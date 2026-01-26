@@ -7,7 +7,7 @@ This is the official PyTorch implementation of the following publication:
 > **Expert Knowledge-Guided Decision Calibration for Accurate Fine-Grained Tree Species Classification**<br/>
 > [Chen Long](https://chenlongwhu.github.io/), Dian Chen, Ruifei Ding, [Zhe Chen](https://github.com/ChenZhe-Code), [Zhen Dong](https://dongzhenwhu.github.io/index.html), [Bisheng Yang](https://3s.whu.edu.cn/info/1025/1415.htm)<br/>
 > *Under Review*<br/>
-> Paper
+> [**Paper**](https://arxiv.org/pdf/2601.16498)
 
 
 ## 🔭 Introduction
@@ -26,6 +26,11 @@ Specifically, we first develop a Local Prior Guided Knowledge Extraction Module 
 Furthermore, we present a large-scale classification dataset covering 102 tree species, named CU-Tree102 to address the issue of scarce diversity in current benchmarks.
 Experiments on three benchmark datasets demonstrate that our approach achieves state-of-the-art performance. Crucially, as a lightweight plug-and-play module, EKDC-Net improves backbone accuracy by **6.42% ** and precision by **11.46%** using only **0.08M** additional learnable parameters.
 </p>
+
+## 🆕 News
+
+- 2026-01-26: Code, [Preprint paper](https://arxiv.org/pdf/2601.16498) are available! 🎉
+
 
 ## 💻 Requirements
 The code has been trained on:
