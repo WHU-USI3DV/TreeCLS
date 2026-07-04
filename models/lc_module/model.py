@@ -1000,6 +1000,15 @@ class LCModel(nn.Module):
                     nn.ReLU(),
                     nn.Linear(64, num_classes)
                 )
+            elif self.fuse_type == 5:
+                self.adn = LogitsFusionTemp(num_classes, num_bins)
+            elif self.fuse_type == 6:
+                self.adn = LogitsFusionSigmod(num_classes, num_bins)
+            elif self.fuse_type == 7:
+                self.adn = LogitsFusionClass(num_classes, num_bins)
+            elif self.fuse_type == 8:
+                self.adn = LogitsFusionSample(num_classes, num_bins)
+
 
     def build_fpn_classifier(self, inputs: dict, fpn_size: int, num_classes: int):
         """
@@ -1355,6 +1364,676 @@ class LogitsFusion(nn.Module):
         t_embedding_weights = self.init_weights.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
         t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  #
         t_embedding = torch.cat([t_entropy.unsqueeze(-1), t_confidence.unsqueeze(-1), t_embedding_weights], dim=-1)  # [B, 5]
+        t_f = self.projection(t_embedding)  # [B, 32]
+
+        gate = self.fuse_weight(torch.cat([v_f, t_f], dim=-1))  # [B, 5]
+
+        ## 根据分箱结果加权
+        bin_probs = F.softmax(gate, dim=-1)
+        text_weights = torch.sum(bin_probs * self.bin_center, dim=-1, keepdim=True)
+        fused_logits = text_weights * t_logits + v_logits
+
+        return fused_logits, text_weights
+
+class LogitsFusionSigmod(nn.Module):
+    def __init__(self, num_classes=102, num_bins=8):
+        super(LogitsFusionSigmod, self).__init__()
+
+        if num_classes == 200:
+            self.class_counts = [30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30]
+
+        elif num_classes == 102:
+            self.class_counts = np.array([66, 86, 55, 52, 67, 35, 89, 94, 24, 29, 34, 60, 43, 114, 64, 83, 59, 42, 12, 72, 47, 105, 132, 52, 23, 24, 26, 16, 32, 33, 66, 83, 42, 53, 8, 137, 34, 43, 21, 96, 12, 56, 63, 52, 12, 40, 24, 72, 68, 24, 32, 52, 15, 21, 24, 74, 14, 4, 64, 40, 20, 48, 15, 32, 10, 56, 42, 50, 16, 18, 3, 16, 4, 2, 21, 4, 48, 4, 45, 11, 57, 14, 25, 33, 33, 45, 84, 44, 31, 36, 54, 61, 12, 8, 4, 13, 105, 76, 4, 55, 48, 20])
+
+        elif num_classes == 100:
+            self.class_counts = np.array([67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67])
+        elif num_classes == 23:
+            self.class_counts = np.array([8, 76, 9, 29, 60, 278, 40, 6, 13, 137, 105, 16, 502, 2000, 7, 48, 6, 5, 7, 57, 605, 2000, 145])
+        else:
+            self.class_counts = np.ones(num_classes)
+
+        ## 根据样本数量初始化权重是不是不太合理，
+
+        class_counts_tensor = torch.tensor(self.class_counts, dtype=torch.float32)
+        initial_weights = self._initialize_smooth_weights(class_counts_tensor)
+
+        self.init_weights = nn.Parameter(initial_weights, requires_grad=True)  # [num_classes]
+
+        ## top3,熵值，置信度
+        self.projection = nn.Sequential(
+            nn.Linear(5, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+        )
+
+        self.fuse_weight = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
+
+    def update_accuracy(self, vision_accuacy, text_accuacy):
+        self.vision_accuacy = vision_accuacy
+        self.text_accuacy = text_accuacy
+
+    def _initialize_smooth_weights(self, class_counts):
+        """
+        根据样本数量初始化平滑的融合权重。
+        样本数量越少，权重越大，且不进行总和归一化。
+        """
+        class_counts = class_counts.float()
+
+        max_count = class_counts.max()
+        min_count = class_counts.min()
+
+        if max_count == min_count:
+            # 如果所有类别计数都相同，可以给一个默认的非零权重，例如1.0
+            return torch.ones_like(class_counts)
+
+        # 归一化到 [0, 1] 范围，其中样本数少的映射到接近1，样本数多的映射到接近0
+        # 使用1e-8避免除以零
+        normalized_counts = 1.0 - (class_counts - min_count) / (max_count - min_count + 1e-8)
+
+        beta = 2.0  # 可以根据需要调整，例如1.0为线性，2.0为平方
+        smoothed_weights = torch.pow(normalized_counts, beta)
+
+        # 不需要总和归一化，直接返回
+        return smoothed_weights.float()
+
+    def get_entropy(self, probs: torch.Tensor):
+        # 1. 计算视觉分支的softmax概率
+        vision_probs = F.softmax(probs, dim=-1)
+        entropy = -torch.sum(vision_probs * torch.log(vision_probs + 1e-8), dim=-1)
+        return entropy
+
+    def get_confidence(self, logits):
+        probs = F.softmax(logits, dim=-1)
+        confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+        return confidence  # [B, 1]
+
+    def get_confidence_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+        embedding_weights = embedding_weights / (topk_probs + 1e-8) # [B, 3]
+
+        return embedding_weights  # [B, 3]
+
+    def get_topk_embedding(self, logits, k=3, type='confidence', reduce='sum'):
+        if type == 'confidence':
+            if reduce == 'sum':
+                return self.get_confidence_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_confidence_embedding(logits, k=k)
+        else:
+            if reduce == 'sum':
+                return self.get_entropy_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_entropy_embedding(logits, k=k)
+
+    def get_entropy_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+
+        return embedding_weights * entropy.unsqueeze(-1)  # [B, 3]
+
+    def get_accuacy_embedding(self, v_logits, t_logits, k=3):
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        v_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        v_embedding_weights = self.vision_accuacy.to(v_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        v_embedding_weights = v_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        v_embedding_weights = v_embedding_weights * v_entropy.unsqueeze(-1)  # [B, 3]
+
+        probs = F.softmax(t_logits, dim=-1)
+        t_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        t_embedding_weights = self.text_accuacy.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        t_embedding_weights = t_embedding_weights * t_entropy.unsqueeze(-1)  # [B, 3]
+
+        return v_embedding_weights.sum(dim=-1, keepdim=True), t_embedding_weights.sum(dim=-1, keepdim=True)
+
+    def normalize_logits(self, logits, eps=1e-6):
+        mean = logits.mean(dim=-1, keepdim=True)
+        std = logits.std(dim=-1, keepdim=True, unbiased=False)
+        return (logits - mean) / (std + eps)
+
+    def forward(self, v_logits, t_logits):
+        ## new表示可学习，explict表示不可学习
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        v_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        v_confidence, _ = torch.max(probs, dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=3, dim=-1, largest=True, sorted=True)
+        v_embedding_weights = self.init_weights.to(v_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        v_embedding_weights = v_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        v_embedding = torch.cat([v_entropy.unsqueeze(-1), v_confidence.unsqueeze(-1), v_embedding_weights], dim=-1)  # [B, 5]
+        v_f = self.projection(v_embedding)  # [B, 32]
+
+        probs = F.softmax(t_logits, dim=-1)
+        t_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        t_confidence, _ = torch.max(probs, dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=3, dim=-1, largest=True, sorted=True)
+        t_embedding_weights = self.init_weights.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  #
+        t_embedding = torch.cat([t_entropy.unsqueeze(-1), t_confidence.unsqueeze(-1), t_embedding_weights], dim=-1)  # [B, 5]
+        t_f = self.projection(t_embedding)  # [B, 32]
+
+        text_weights = self.fuse_weight(torch.cat([v_f, t_f], dim=-1)) * 2  # [B, 5]
+
+        ## 对t_logits和v_logits进行归一化先
+
+        fused_logits = text_weights * t_logits + v_logits
+
+        return fused_logits, text_weights
+
+class LogitsFusionTemp(nn.Module):
+    def __init__(self, num_classes=102, num_bins=8):
+        super(LogitsFusionTemp, self).__init__()
+
+        if num_classes == 200:
+            self.class_counts = [30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30]
+
+        elif num_classes == 102:
+            self.class_counts = np.array([66, 86, 55, 52, 67, 35, 89, 94, 24, 29, 34, 60, 43, 114, 64, 83, 59, 42, 12, 72, 47, 105, 132, 52, 23, 24, 26, 16, 32, 33, 66, 83, 42, 53, 8, 137, 34, 43, 21, 96, 12, 56, 63, 52, 12, 40, 24, 72, 68, 24, 32, 52, 15, 21, 24, 74, 14, 4, 64, 40, 20, 48, 15, 32, 10, 56, 42, 50, 16, 18, 3, 16, 4, 2, 21, 4, 48, 4, 45, 11, 57, 14, 25, 33, 33, 45, 84, 44, 31, 36, 54, 61, 12, 8, 4, 13, 105, 76, 4, 55, 48, 20])
+
+        elif num_classes == 100:
+            self.class_counts = np.array([67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67])
+        elif num_classes == 23:
+            self.class_counts = np.array([8, 76, 9, 29, 60, 278, 40, 6, 13, 137, 105, 16, 502, 2000, 7, 48, 6, 5, 7, 57, 605, 2000, 145])
+        else:
+            self.class_counts = np.ones(num_classes)
+
+        ## 根据样本数量初始化权重是不是不太合理，
+
+        class_counts_tensor = torch.tensor(self.class_counts, dtype=torch.float32)
+        initial_weights = self._initialize_smooth_weights(class_counts_tensor)
+
+        self.init_weights = nn.Parameter(initial_weights, requires_grad=True)  # [num_classes]
+
+        self.num_bins = num_bins
+
+        ## 搞成5阶分箱
+        bin_center = torch.linspace(0, 2, steps=self.num_bins + 1, dtype=torch.float32)
+        self.register_buffer('bin_center', bin_center)
+
+        ## top3,熵值，置信度
+        self.projection = nn.Sequential(
+            nn.Linear(5, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+        )
+
+        self.fuse_weight = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, self.num_bins + 1),
+        )
+
+        self.log_expert_temperature = nn.Parameter(torch.zeros(1))
+
+    def get_expert_temperature(self):
+        # Clamp only for numerical stability.
+        return torch.exp(self.log_expert_temperature).clamp(min=1e-3, max=1e3)
+
+
+    def update_accuracy(self, vision_accuacy, text_accuacy):
+        self.vision_accuacy = vision_accuacy
+        self.text_accuacy = text_accuacy
+
+    def _initialize_smooth_weights(self, class_counts):
+        """
+        根据样本数量初始化平滑的融合权重。
+        样本数量越少，权重越大，且不进行总和归一化。
+        """
+        class_counts = class_counts.float()
+
+        max_count = class_counts.max()
+        min_count = class_counts.min()
+
+        if max_count == min_count:
+            # 如果所有类别计数都相同，可以给一个默认的非零权重，例如1.0
+            return torch.ones_like(class_counts)
+
+        # 归一化到 [0, 1] 范围，其中样本数少的映射到接近1，样本数多的映射到接近0
+        # 使用1e-8避免除以零
+        normalized_counts = 1.0 - (class_counts - min_count) / (max_count - min_count + 1e-8)
+
+        beta = 2.0  # 可以根据需要调整，例如1.0为线性，2.0为平方
+        smoothed_weights = torch.pow(normalized_counts, beta)
+
+        # 不需要总和归一化，直接返回
+        return smoothed_weights.float()
+
+    def get_entropy(self, probs: torch.Tensor):
+        # 1. 计算视觉分支的softmax概率
+        vision_probs = F.softmax(probs, dim=-1)
+        entropy = -torch.sum(vision_probs * torch.log(vision_probs + 1e-8), dim=-1)
+        return entropy
+
+    def get_confidence(self, logits):
+        probs = F.softmax(logits, dim=-1)
+        confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+        return confidence  # [B, 1]
+
+    def get_confidence_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+        embedding_weights = embedding_weights / (topk_probs + 1e-8) # [B, 3]
+
+        return embedding_weights  # [B, 3]
+
+    def get_topk_embedding(self, logits, k=3, type='confidence', reduce='sum'):
+        if type == 'confidence':
+            if reduce == 'sum':
+                return self.get_confidence_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_confidence_embedding(logits, k=k)
+        else:
+            if reduce == 'sum':
+                return self.get_entropy_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_entropy_embedding(logits, k=k)
+
+    def get_entropy_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+
+        return embedding_weights * entropy.unsqueeze(-1)  # [B, 3]
+
+    def get_accuacy_embedding(self, v_logits, t_logits, k=3):
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        v_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        v_embedding_weights = self.vision_accuacy.to(v_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        v_embedding_weights = v_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        v_embedding_weights = v_embedding_weights * v_entropy.unsqueeze(-1)  # [B, 3]
+
+        probs = F.softmax(t_logits, dim=-1)
+        t_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        t_embedding_weights = self.text_accuacy.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        t_embedding_weights = t_embedding_weights * t_entropy.unsqueeze(-1)  # [B, 3]
+
+        return v_embedding_weights.sum(dim=-1, keepdim=True), t_embedding_weights.sum(dim=-1, keepdim=True)
+
+
+    def forward(self, v_logits, t_logits):
+        ## new表示可学习，explict表示不可学习
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        v_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        v_confidence, _ = torch.max(probs, dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=3, dim=-1, largest=True, sorted=True)
+        v_embedding_weights = self.init_weights.to(v_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        v_embedding_weights = v_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        v_embedding = torch.cat([v_entropy.unsqueeze(-1), v_confidence.unsqueeze(-1), v_embedding_weights], dim=-1)  # [B, 5]
+        v_f = self.projection(v_embedding)  # [B, 32]
+
+        probs = F.softmax(t_logits, dim=-1)
+        t_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        t_confidence, _ = torch.max(probs, dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=3, dim=-1, largest=True, sorted=True)
+        t_embedding_weights = self.init_weights.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  #
+        t_embedding = torch.cat([t_entropy.unsqueeze(-1), t_confidence.unsqueeze(-1), t_embedding_weights], dim=-1)  # [B, 5]
+        t_f = self.projection(t_embedding)  # [B, 32]
+
+        gate = self.fuse_weight(torch.cat([v_f, t_f], dim=-1))  # [B, 5]
+
+        ## 根据分箱结果加权
+        bin_probs = F.softmax(gate, dim=-1)
+        text_weights = torch.sum(bin_probs * self.bin_center, dim=-1, keepdim=True)
+        expert_temperature = self.get_expert_temperature().to(device=t_logits.device, dtype=t_logits.dtype)
+
+        fused_logits = text_weights * t_logits / expert_temperature + v_logits
+
+        return fused_logits, text_weights
+
+
+class LogitsFusionSample(nn.Module):
+    def __init__(self, num_classes=102, num_bins=8):
+        super(LogitsFusionSample, self).__init__()
+
+        if num_classes == 200:
+            self.class_counts = [30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30]
+
+        elif num_classes == 102:
+            self.class_counts = np.array([66, 86, 55, 52, 67, 35, 89, 94, 24, 29, 34, 60, 43, 114, 64, 83, 59, 42, 12, 72, 47, 105, 132, 52, 23, 24, 26, 16, 32, 33, 66, 83, 42, 53, 8, 137, 34, 43, 21, 96, 12, 56, 63, 52, 12, 40, 24, 72, 68, 24, 32, 52, 15, 21, 24, 74, 14, 4, 64, 40, 20, 48, 15, 32, 10, 56, 42, 50, 16, 18, 3, 16, 4, 2, 21, 4, 48, 4, 45, 11, 57, 14, 25, 33, 33, 45, 84, 44, 31, 36, 54, 61, 12, 8, 4, 13, 105, 76, 4, 55, 48, 20])
+
+        elif num_classes == 100:
+            self.class_counts = np.array([67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67])
+        elif num_classes == 23:
+            self.class_counts = np.array([8, 76, 9, 29, 60, 278, 40, 6, 13, 137, 105, 16, 502, 2000, 7, 48, 6, 5, 7, 57, 605, 2000, 145])
+        else:
+            self.class_counts = np.ones(num_classes)
+
+        ## 根据样本数量初始化权重是不是不太合理，
+
+        class_counts_tensor = torch.tensor(self.class_counts, dtype=torch.float32)
+        initial_weights = self._initialize_smooth_weights(class_counts_tensor)
+
+        self.init_weights = nn.Parameter(initial_weights, requires_grad=True)  # [num_classes]
+
+        self.num_bins = num_bins
+
+        ## 搞成5阶分箱
+        bin_center = torch.linspace(0, 2, steps=self.num_bins + 1, dtype=torch.float32)
+        self.register_buffer('bin_center', bin_center)
+
+        ## top3,熵值，置信度
+        self.projection = nn.Sequential(
+            nn.Linear(2, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+        )
+
+        self.fuse_weight = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, self.num_bins + 1),
+        )
+
+
+    def update_accuracy(self, vision_accuacy, text_accuacy):
+        self.vision_accuacy = vision_accuacy
+        self.text_accuacy = text_accuacy
+
+    def _initialize_smooth_weights(self, class_counts):
+        """
+        根据样本数量初始化平滑的融合权重。
+        样本数量越少，权重越大，且不进行总和归一化。
+        """
+        class_counts = class_counts.float()
+
+        max_count = class_counts.max()
+        min_count = class_counts.min()
+
+        if max_count == min_count:
+            # 如果所有类别计数都相同，可以给一个默认的非零权重，例如1.0
+            return torch.ones_like(class_counts)
+
+        # 归一化到 [0, 1] 范围，其中样本数少的映射到接近1，样本数多的映射到接近0
+        # 使用1e-8避免除以零
+        normalized_counts = 1.0 - (class_counts - min_count) / (max_count - min_count + 1e-8)
+
+        beta = 2.0  # 可以根据需要调整，例如1.0为线性，2.0为平方
+        smoothed_weights = torch.pow(normalized_counts, beta)
+
+        # 不需要总和归一化，直接返回
+        return smoothed_weights.float()
+
+    def get_entropy(self, probs: torch.Tensor):
+        # 1. 计算视觉分支的softmax概率
+        vision_probs = F.softmax(probs, dim=-1)
+        entropy = -torch.sum(vision_probs * torch.log(vision_probs + 1e-8), dim=-1)
+        return entropy
+
+    def get_confidence(self, logits):
+        probs = F.softmax(logits, dim=-1)
+        confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+        return confidence  # [B, 1]
+
+    def get_confidence_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+        embedding_weights = embedding_weights / (topk_probs + 1e-8) # [B, 3]
+
+        return embedding_weights  # [B, 3]
+
+    def get_topk_embedding(self, logits, k=3, type='confidence', reduce='sum'):
+        if type == 'confidence':
+            if reduce == 'sum':
+                return self.get_confidence_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_confidence_embedding(logits, k=k)
+        else:
+            if reduce == 'sum':
+                return self.get_entropy_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_entropy_embedding(logits, k=k)
+
+    def get_entropy_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+
+        return embedding_weights * entropy.unsqueeze(-1)  # [B, 3]
+
+    def get_accuacy_embedding(self, v_logits, t_logits, k=3):
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        v_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        v_embedding_weights = self.vision_accuacy.to(v_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        v_embedding_weights = v_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        v_embedding_weights = v_embedding_weights * v_entropy.unsqueeze(-1)  # [B, 3]
+
+        probs = F.softmax(t_logits, dim=-1)
+        t_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        t_embedding_weights = self.text_accuacy.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        t_embedding_weights = t_embedding_weights * t_entropy.unsqueeze(-1)  # [B, 3]
+
+        return v_embedding_weights.sum(dim=-1, keepdim=True), t_embedding_weights.sum(dim=-1, keepdim=True)
+
+    def forward(self, v_logits, t_logits):
+        ## new表示可学习，explict表示不可学习
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        v_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        v_confidence, _ = torch.max(probs, dim=-1)  # [B]
+        v_embedding = torch.cat([v_entropy.unsqueeze(-1), v_confidence.unsqueeze(-1)], dim=-1)  # [B, 5]
+        v_f = self.projection(v_embedding)  # [B, 32]
+
+        probs = F.softmax(t_logits, dim=-1)
+        t_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        t_confidence, _ = torch.max(probs, dim=-1)  # [B]
+        t_embedding = torch.cat([t_entropy.unsqueeze(-1), t_confidence.unsqueeze(-1)], dim=-1)  # [B, 5]
+        t_f = self.projection(t_embedding)  # [B, 32]
+
+        gate = self.fuse_weight(torch.cat([v_f, t_f], dim=-1))  # [B, 5]
+
+        ## 根据分箱结果加权
+        bin_probs = F.softmax(gate, dim=-1)
+        text_weights = torch.sum(bin_probs * self.bin_center, dim=-1, keepdim=True)
+        fused_logits = text_weights * t_logits + v_logits
+
+        return fused_logits, text_weights
+
+class LogitsFusionClass(nn.Module):
+    def __init__(self, num_classes=102, num_bins=8):
+        super(LogitsFusionClass, self).__init__()
+
+        if num_classes == 200:
+            self.class_counts = [30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30, 30, 29, 30, 30, 30, 30]
+
+        elif num_classes == 102:
+            self.class_counts = np.array([66, 86, 55, 52, 67, 35, 89, 94, 24, 29, 34, 60, 43, 114, 64, 83, 59, 42, 12, 72, 47, 105, 132, 52, 23, 24, 26, 16, 32, 33, 66, 83, 42, 53, 8, 137, 34, 43, 21, 96, 12, 56, 63, 52, 12, 40, 24, 72, 68, 24, 32, 52, 15, 21, 24, 74, 14, 4, 64, 40, 20, 48, 15, 32, 10, 56, 42, 50, 16, 18, 3, 16, 4, 2, 21, 4, 48, 4, 45, 11, 57, 14, 25, 33, 33, 45, 84, 44, 31, 36, 54, 61, 12, 8, 4, 13, 105, 76, 4, 55, 48, 20])
+
+        elif num_classes == 100:
+            self.class_counts = np.array([67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67, 67, 66, 67])
+        elif num_classes == 23:
+            self.class_counts = np.array([8, 76, 9, 29, 60, 278, 40, 6, 13, 137, 105, 16, 502, 2000, 7, 48, 6, 5, 7, 57, 605, 2000, 145])
+        else:
+            self.class_counts = np.ones(num_classes)
+
+        ## 根据样本数量初始化权重是不是不太合理，
+
+        class_counts_tensor = torch.tensor(self.class_counts, dtype=torch.float32)
+        initial_weights = self._initialize_smooth_weights(class_counts_tensor)
+
+        self.init_weights = nn.Parameter(initial_weights, requires_grad=True)  # [num_classes]
+
+        self.num_bins = num_bins
+
+        ## 搞成5阶分箱
+        bin_center = torch.linspace(0, 2, steps=self.num_bins + 1, dtype=torch.float32)
+        self.register_buffer('bin_center', bin_center)
+
+        ## top3,熵值，置信度
+        self.projection = nn.Sequential(
+            nn.Linear(3, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+        )
+
+        self.fuse_weight = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, self.num_bins + 1),
+        )
+
+
+    def update_accuracy(self, vision_accuacy, text_accuacy):
+        self.vision_accuacy = vision_accuacy
+        self.text_accuacy = text_accuacy
+
+    def _initialize_smooth_weights(self, class_counts):
+        """
+        根据样本数量初始化平滑的融合权重。
+        样本数量越少，权重越大，且不进行总和归一化。
+        """
+        class_counts = class_counts.float()
+
+        max_count = class_counts.max()
+        min_count = class_counts.min()
+
+        if max_count == min_count:
+            # 如果所有类别计数都相同，可以给一个默认的非零权重，例如1.0
+            return torch.ones_like(class_counts)
+
+        # 归一化到 [0, 1] 范围，其中样本数少的映射到接近1，样本数多的映射到接近0
+        # 使用1e-8避免除以零
+        normalized_counts = 1.0 - (class_counts - min_count) / (max_count - min_count + 1e-8)
+
+        beta = 2.0  # 可以根据需要调整，例如1.0为线性，2.0为平方
+        smoothed_weights = torch.pow(normalized_counts, beta)
+
+        # 不需要总和归一化，直接返回
+        return smoothed_weights.float()
+
+    def get_entropy(self, probs: torch.Tensor):
+        # 1. 计算视觉分支的softmax概率
+        vision_probs = F.softmax(probs, dim=-1)
+        entropy = -torch.sum(vision_probs * torch.log(vision_probs + 1e-8), dim=-1)
+        return entropy
+
+    def get_confidence(self, logits):
+        probs = F.softmax(logits, dim=-1)
+        confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+        return confidence  # [B, 1]
+
+    def get_confidence_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+        embedding_weights = embedding_weights / (topk_probs + 1e-8) # [B, 3]
+
+        return embedding_weights  # [B, 3]
+
+    def get_topk_embedding(self, logits, k=3, type='confidence', reduce='sum'):
+        if type == 'confidence':
+            if reduce == 'sum':
+                return self.get_confidence_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_confidence_embedding(logits, k=k)
+        else:
+            if reduce == 'sum':
+                return self.get_entropy_embedding(logits, k=k).sum(dim=-1, keepdim=True)
+            return self.get_entropy_embedding(logits, k=k)
+
+    def get_entropy_embedding(self, logits, k=3):
+        probs = F.softmax(logits, dim=-1)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        batch_size = logits.size(0)
+        embedding_weights = self.init_weights.to(logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        embedding_weights = embedding_weights.gather(1, topk_indices)  # [B, 3]
+
+        return embedding_weights * entropy.unsqueeze(-1)  # [B, 3]
+
+    def get_accuacy_embedding(self, v_logits, t_logits, k=3):
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        v_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        v_embedding_weights = self.vision_accuacy.to(v_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        v_embedding_weights = v_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        v_embedding_weights = v_embedding_weights * v_entropy.unsqueeze(-1)  # [B, 3]
+
+        probs = F.softmax(t_logits, dim=-1)
+        t_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)  # [B]
+        _, topk_indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        t_embedding_weights = self.text_accuacy.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        t_embedding_weights = t_embedding_weights * t_entropy.unsqueeze(-1)  # [B, 3]
+
+        return v_embedding_weights.sum(dim=-1, keepdim=True), t_embedding_weights.sum(dim=-1, keepdim=True)
+
+    def forward(self, v_logits, t_logits):
+        ## new表示可学习，explict表示不可学习
+        batch_size = v_logits.size(0)
+
+        probs = F.softmax(v_logits, dim=-1)
+        _, topk_indices = torch.topk(probs, k=3, dim=-1, largest=True, sorted=True)
+        v_embedding_weights = self.init_weights.to(v_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        v_embedding_weights = v_embedding_weights.gather(1, topk_indices)  # [B, 3]
+        v_embedding = v_embedding_weights  # [B, 3]
+        v_f = self.projection(v_embedding)  # [B, 32]
+
+        probs = F.softmax(t_logits, dim=-1)
+        _, topk_indices = torch.topk(probs, k=3, dim=-1, largest=True, sorted=True)
+        t_embedding_weights = self.init_weights.to(t_logits.device).unsqueeze(0).expand(batch_size, -1)  # [B, num_classes]
+        t_embedding_weights = t_embedding_weights.gather(1, topk_indices)  #
+        t_embedding = t_embedding_weights  # [B, 3]
         t_f = self.projection(t_embedding)  # [B, 32]
 
         gate = self.fuse_weight(torch.cat([v_f, t_f], dim=-1))  # [B, 5]

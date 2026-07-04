@@ -24,7 +24,7 @@ Inspired by this, we introduce an external "Domain Expert" and propose an Expert
 Our framework addresses two core issues: expert knowledge extraction and utilization.
 Specifically, we first develop a Local Prior Guided Knowledge Extraction Module (LPKEM). By leveraging Class Activation Map (CAM) analysis, LPKEM guides the domain expert to focus exclusively on discriminative features essential for classification. Subsequently, to effectively integrate this knowledge, we design an Uncertainty-Guided Decision Calibration Module (UDCM). This module dynamically corrects the local model's decisions by considering both overall category uncertainty and instance-level prediction uncertainty.
 Furthermore, we present a large-scale classification dataset covering 102 tree species, named CU-Tree102 to address the issue of scarce diversity in current benchmarks.
-Experiments on three benchmark datasets demonstrate that our approach achieves state-of-the-art performance. Crucially, as a lightweight plug-and-play module, EKDC-Net improves backbone accuracy by **6.42% ** and precision by **11.46%** using only **0.08M** additional learnable parameters.
+Experiments on three benchmark datasets demonstrate that our approach achieves state-of-the-art performance. Crucially, as a lightweight plug-and-play module, EKDC-Net improves backbone accuracy by **7.89% ** and precision by **12.86%** using only **0.08M** additional learnable parameters.
 </p>
 
 ## 🆕 News
