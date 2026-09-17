@@ -6,8 +6,8 @@ This is the official PyTorch implementation of the following publication:
 
 > **Expert Knowledge-Guided Decision Calibration for Accurate Fine-Grained Tree Species Classification**<br/>
 > [Chen Long](https://chenlongwhu.github.io/), Dian Chen, Ruifei Ding, [Zhe Chen](https://github.com/ChenZhe-Code), [Zhen Dong](https://dongzhenwhu.github.io/index.html), [Bisheng Yang](https://3s.whu.edu.cn/info/1025/1415.htm)<br/>
-> *Under Review*<br/>
-> [**Paper**](https://arxiv.org/pdf/2601.16498)
+> *ISPRS J 2026*<br/>
+> [**Paper**](https://doi.org/10.1016/j.isprsjprs.2026.09.013)
 
 
 ## 🔭 Introduction
@@ -29,6 +29,7 @@ Experiments on three benchmark datasets demonstrate that our approach achieves s
 
 ## 🆕 News
 
+- 2026-09-08: Our paper is accepted by ISPRSJ! 🎉
 - 2026-01-26: Code, [Preprint paper](https://arxiv.org/pdf/2601.16498) are available! 🎉
 
 
